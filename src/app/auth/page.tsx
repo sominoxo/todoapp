@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
@@ -14,6 +14,15 @@ export default function AuthPage() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // メール確認リンク経由でここに来た場合、セッションを検知して / に遷移
+  useEffect(() => {
+    supabase.auth.onAuthStateChange((event, session) => {
+      if ((event === "SIGNED_IN" || event === "USER_UPDATED") && session) {
+        router.replace("/");
+      }
+    });
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
