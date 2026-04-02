@@ -1,63 +1,115 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-
-type Todo = {
-  id: string;
-  text: string;
-  completed: boolean;
-  createdAt: number;
-};
-
-const STORAGE_KEY = "todos-v1";
-
-function loadTodos(): Todo[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveTodos(todos: Todo[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-}
+import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
+import { supabase, type Todo } from "@/lib/supabase";
+import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 
 export default function Home() {
+  const router = useRouter();
+  const [userId, setUserId] = useState<string | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [input, setInput] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "done">("all");
+  const [loading, setLoading] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // セッション確認 & 初回データ取得
   useEffect(() => {
-    setTodos(loadTodos());
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        router.replace("/auth");
+        return;
+      }
+      setUserId(session.user.id);
+
+      supabase
+        .from("todos")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .then(({ data }) => {
+          setTodos(data ?? []);
+          setLoading(false);
+        });
+    });
   }, []);
 
+  // 別タブでログアウトした場合にも追随
   useEffect(() => {
-    saveTodos(todos);
-  }, [todos]);
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT" || !session) {
+        router.replace("/auth");
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
-  const addTodo = () => {
+  // リアルタイム同期（他デバイスでの変更を即時反映）
+  useEffect(() => {
+    if (!userId) return;
+
+    const channel = supabase
+      .channel("todos-realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "todos",
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload: RealtimePostgresChangesPayload<Todo>) => {
+          if (payload.eventType === "INSERT") {
+            setTodos((prev) => [payload.new as Todo, ...prev]);
+          }
+          if (payload.eventType === "UPDATE") {
+            setTodos((prev) =>
+              prev.map((t) =>
+                t.id === (payload.new as Todo).id ? (payload.new as Todo) : t
+              )
+            );
+          }
+          if (payload.eventType === "DELETE") {
+            setTodos((prev) =>
+              prev.filter((t) => t.id !== (payload.old as Todo).id)
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId]);
+
+  const addTodo = async () => {
     const text = input.trim();
-    if (!text) return;
-    setTodos((prev) => [
-      { id: crypto.randomUUID(), text, completed: false, createdAt: Date.now() },
-      ...prev,
-    ]);
+    if (!text || !userId) return;
     setInput("");
     inputRef.current?.focus();
+    await supabase.from("todos").insert({ text, completed: false, user_id: userId });
+    // Realtime が INSERT を受け取り setTodos を更新する
   };
 
-  const toggleTodo = (id: string) => {
-    setTodos((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t))
-    );
+  const toggleTodo = async (id: string, completed: boolean) => {
+    await supabase.from("todos").update({ completed: !completed }).eq("id", id);
   };
 
-  const deleteTodo = (id: string) => {
-    setTodos((prev) => prev.filter((t) => t.id !== id));
+  const deleteTodo = async (id: string) => {
+    await supabase.from("todos").delete().eq("id", id);
+  };
+
+  const clearCompleted = async () => {
+    const ids = todos.filter((t) => t.completed).map((t) => t.id);
+    if (ids.length === 0) return;
+    await supabase.from("todos").delete().in("id", ids);
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
   };
 
   const filtered = todos.filter((t) => {
@@ -69,19 +121,35 @@ export default function Home() {
   const doneCount = todos.filter((t) => t.completed).length;
   const totalCount = todos.length;
 
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-sm text-stone-300">読み込み中...</div>
+      </div>
+    );
+  }
+
   return (
     <main className="min-h-screen flex flex-col items-center py-16 px-4">
       <div className="w-full max-w-lg">
         {/* Header */}
-        <div className="mb-10">
-          <h1 className="text-3xl font-bold tracking-tight text-stone-800">
-            ToDoリスト
-          </h1>
-          {totalCount > 0 && (
-            <p className="mt-1 text-sm text-stone-400">
-              {doneCount} / {totalCount} 件完了
-            </p>
-          )}
+        <div className="mb-10 flex items-start justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-stone-800">
+              ToDoリスト
+            </h1>
+            {totalCount > 0 && (
+              <p className="mt-1 text-sm text-stone-400">
+                {doneCount} / {totalCount} 件完了
+              </p>
+            )}
+          </div>
+          <button
+            onClick={handleSignOut}
+            className="mt-1 text-xs text-stone-300 hover:text-stone-500 transition"
+          >
+            ログアウト
+          </button>
         </div>
 
         {/* Input */}
@@ -91,7 +159,9 @@ export default function Home() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && addTodo()}
+            onKeyDown={(e) =>
+              e.key === "Enter" && !e.nativeEvent.isComposing && addTodo()
+            }
             placeholder="新しいタスクを入力..."
             className="flex-1 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-800 placeholder-stone-300 shadow-sm outline-none transition focus:border-stone-400 focus:ring-2 focus:ring-stone-200"
           />
@@ -143,7 +213,7 @@ export default function Home() {
             >
               {/* Checkbox */}
               <button
-                onClick={() => toggleTodo(todo.id)}
+                onClick={() => toggleTodo(todo.id, todo.completed)}
                 className={`flex-shrink-0 h-5 w-5 rounded-full border-2 transition flex items-center justify-center ${
                   todo.completed
                     ? "border-emerald-400 bg-emerald-400"
@@ -192,20 +262,17 @@ export default function Home() {
                   stroke="currentColor"
                   strokeWidth={1.8}
                 >
-                  <path
-                    strokeLinecap="round"
-                    d="M4 4l8 8M12 4l-8 8"
-                  />
+                  <path strokeLinecap="round" d="M4 4l8 8M12 4l-8 8" />
                 </svg>
               </button>
             </li>
           ))}
         </ul>
 
-        {/* Clear done */}
+        {/* Clear completed */}
         {doneCount > 0 && (
           <button
-            onClick={() => setTodos((prev) => prev.filter((t) => !t.completed))}
+            onClick={clearCompleted}
             className="mt-6 text-xs text-stone-300 hover:text-red-400 transition"
           >
             完了済みをすべて削除
