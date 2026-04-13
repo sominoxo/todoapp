@@ -90,22 +90,38 @@ export default function Home() {
     if (!text || !userId) return;
     setInput("");
     inputRef.current?.focus();
-    await supabase.from("todos").insert({ text, completed: false, user_id: userId });
-    // Realtime が INSERT を受け取り setTodos を更新する
+    const { data } = await supabase
+      .from("todos")
+      .insert({ text, completed: false, user_id: userId })
+      .select()
+      .single();
+    if (data) {
+      setTodos((prev) => [data as Todo, ...prev]);
+    }
   };
 
   const toggleTodo = async (id: string, completed: boolean) => {
-    await supabase.from("todos").update({ completed: !completed }).eq("id", id);
+    const { data } = await supabase
+      .from("todos")
+      .update({ completed: !completed })
+      .eq("id", id)
+      .select()
+      .single();
+    if (data) {
+      setTodos((prev) => prev.map((t) => (t.id === id ? (data as Todo) : t)));
+    }
   };
 
   const deleteTodo = async (id: string) => {
     await supabase.from("todos").delete().eq("id", id);
+    setTodos((prev) => prev.filter((t) => t.id !== id));
   };
 
   const clearCompleted = async () => {
     const ids = todos.filter((t) => t.completed).map((t) => t.id);
     if (ids.length === 0) return;
     await supabase.from("todos").delete().in("id", ids);
+    setTodos((prev) => prev.filter((t) => !t.completed));
   };
 
   const handleSignOut = async () => {
